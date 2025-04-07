@@ -131,25 +131,24 @@ bot.command("list", (ctx) => {
 	const channels = db
 		.prepare(
 			`
-      SELECT id, telegram_chat_id, viber_token, is_active 
-      FROM channels 
-      WHERE user_id = ?
-    `
+			SELECT id, telegram_chat_id, viber_token, is_active 
+			FROM channels 
+			WHERE user_id = ?
+			`
 		)
 		.all(ctx.from.id);
 	if (!channels.length) {
 		return ctx.reply("ℹ️ У вас немає налаштованих каналів");
 	}
-	const list = channels
-		.map(
-			(ch) => `
-ID: ${ch.id}
-Telegram Chat ID: ${ch.telegram_chat_id}
-Viber Token: ${ch.viber_token.slice(0, 6)}...
-Статус: ${ch.is_active ? "активний ✅" : "призупинено ⏸"}`
-		)
+	const list = channels.map(
+		(ch) => `
+				ID: ${ch.id}
+				Telegram Chat ID: ${ch.telegram_chat_id}
+				Viber Token: ${ch.viber_token.slice(0, 6)}...
+				Статус: ${ch.is_active ? "активний ✅" : "призупинено ⏸"}`
+	)
 		.join("\n\n");
-	logUser(ctx, "📋 Ваші канали:" + list);
+	ctx.reply(`Ваші канали:\n\n${list}`);
 });
 
 // Команда паузи
@@ -238,9 +237,9 @@ bot.on("channel_post", async (ctx) => {
 					const photoArray = ctx.channelPost.photo;
 					const caption = ctx.channelPost.caption
 						? addLinks(
-								ctx.channelPost.caption,
-								ctx.channelPost.caption_entities
-						  )
+							ctx.channelPost.caption,
+							ctx.channelPost.caption_entities
+						)
 						: "";
 					// Беремо найкращу якість (останній елемент)
 					const bestPhoto = photoArray[photoArray.length - 1];
@@ -258,9 +257,9 @@ bot.on("channel_post", async (ctx) => {
 					const link = await bot.telegram.getFileLink(video.file_id);
 					const caption = ctx.channelPost.caption
 						? addLinks(
-								ctx.channelPost.caption,
-								ctx.channelPost.caption_entities
-						  )
+							ctx.channelPost.caption,
+							ctx.channelPost.caption_entities
+						)
 						: "";
 					await viberSendVideo(
 						link,
@@ -283,8 +282,8 @@ bot.on("channel_post", async (ctx) => {
 	}
 });
 
-// Максимальний ліміт байтів для тексту (безпечне значення)
-const maxSafeBytes = 30000;
+
+const maxlenghtCaption = 767;
 
 // Функція для відправки текстового повідомлення з розбиттям на частини
 function viberSendText(text, viberToken, adminId) {
@@ -321,7 +320,7 @@ function viberSendText(text, viberToken, adminId) {
 	}
 
 	// Якщо розмір тексту у байтах не перевищує ліміт – відправляємо одразу
-	if (Buffer.byteLength(text, "utf8") <= maxSafeBytes) {
+	if (Buffer.byteLength(text, "utf8") <= maxlenghtCaption) {
 		sendChunk(text);
 		return;
 	}
@@ -335,7 +334,7 @@ function viberSendText(text, viberToken, adminId) {
 		while (low < high) {
 			const mid = Math.floor((low + high + 1) / 2);
 			const substr = text.substring(currentIndex, mid);
-			if (Buffer.byteLength(substr, "utf8") <= maxSafeBytes) {
+			if (Buffer.byteLength(substr, "utf8") <= maxlenghtCaption) {
 				low = mid;
 			} else {
 				high = mid - 1;
@@ -357,7 +356,7 @@ function viberSendText(text, viberToken, adminId) {
 function viberSendPicture(link, caption, viberToken, adminId) {
 	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
 	// Якщо caption існує і його розмір перевищує ліміт, надсилаємо фото без підпису
-	if (caption && Buffer.byteLength(caption, "utf8") > maxSafeBytes) {
+	if (caption.length > maxlenghtCaption) {
 		const payloadPicture = {
 			auth_token: viberToken,
 			from: adminId,
@@ -430,7 +429,7 @@ function viberSendVideo(
 ) {
 	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
 	// Якщо caption існує і його розмір перевищує ліміт, надсилаємо відео без підпису
-	if (caption && Buffer.byteLength(caption, "utf8") > maxSafeBytes) {
+	if (caption.launch > maxlenghtCaption) {
 		const payloadVideo = {
 			auth_token: viberToken,
 			from: adminId,
@@ -511,7 +510,7 @@ function addLinks(text, entities) {
 		if (entity.type === "text_link" && entity.url) {
 			result += `${entityText} (${entity.url})`;
 		} else if (entity.type === "url") {
-			result += `<a href="${entityText}">${entityText}</a>`;
+			result += `\n${entityText}\n`;
 		} else {
 			result += entityText;
 		}
