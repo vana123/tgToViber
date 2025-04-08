@@ -287,6 +287,7 @@ const maxlenghtCaption = 767;
 
 // Функція для відправки текстового повідомлення з розбиттям на частини
 function viberSendText(text, viberToken, adminId) {
+	const maxlenght = 1000
 	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
 
 	// Допоміжна функція для відправки одного фрагмента повідомлення
@@ -320,7 +321,7 @@ function viberSendText(text, viberToken, adminId) {
 	}
 
 	// Якщо розмір тексту у байтах не перевищує ліміт – відправляємо одразу
-	if (Buffer.byteLength(text, "utf8") <= maxlenghtCaption) {
+	if (text.length <= maxlenght) {
 		sendChunk(text);
 		return;
 	}
@@ -334,7 +335,7 @@ function viberSendText(text, viberToken, adminId) {
 		while (low < high) {
 			const mid = Math.floor((low + high + 1) / 2);
 			const substr = text.substring(currentIndex, mid);
-			if (Buffer.byteLength(substr, "utf8") <= maxlenghtCaption) {
+			if (substr.length <= maxlenght) {
 				low = mid;
 			} else {
 				high = mid - 1;
