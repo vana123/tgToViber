@@ -1,7 +1,7 @@
 require("dotenv").config();
 const { Telegraf } = require("telegraf");
-const axios = require("axios");
 const Database = require("better-sqlite3");
+const ViberClient = require("./viber-client");
 
 const db = new Database("bot.db");
 
@@ -80,21 +80,18 @@ bot.command("setup", async (ctx) => {
 	}
 	const [viberToken, telegramChatId] = args;
 	try {
-		await setViberWebhookForChannel(viberToken);
-		// Використовуємо POST запит; видаляємо властивість params з тіла
-		const viberCheck = await axios.post(
-			"https://chatapi.viber.com/pa/get_account_info",
-			{ auth_token: viberToken },
-			{
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			}
+		const viberClient = new ViberClient(viberToken);
+		
+		// Встановлюємо webhook (не обов'язковий для відправки повідомлень)
+		const webhookResult = await viberClient.setWebhook(
+			"https://webhook.site/b94ba94f-b294-4c7d-9cdd-5bd589f19bc7"
 		);
-		console.log("Отримано get_account_info:", viberCheck.data);
-		if (viberCheck.data.status !== 0) {
-			return;
+		// Продовжуємо навіть якщо webhook не встановлено, оскільки він не потрібен для відправки
+		
+		// Перевіряємо валідність токену
+		const accountInfo = await viberClient.getAccountInfo();
+		if (!accountInfo.success) {
+			return ctx.reply("❌ Невірний Viber токен!");
 		}
 		// Перевірка доступу до Telegram каналу
 		const chatMember = await ctx.telegram.getChatMember(
@@ -205,6 +202,10 @@ function sendToAdmin(message) {
 
 // Обробка постів (пересилання повідомлень з Telegram каналу до Viber каналу)
 bot.on("channel_post", async (ctx) => {
+	console.log(`\n========== [channel_post] Отримано пост ==========`);
+	console.log(`Chat ID: ${ctx.chat.id}`);
+	console.log(`Тип повідомлення: ${ctx.channelPost.text ? 'текст' : ctx.channelPost.photo ? 'фото' : ctx.channelPost.video ? 'відео' : 'інше'}`);
+	
 	try {
 		// Отримуємо конфігурації каналу разом із user_id
 		const channels = db
@@ -217,20 +218,44 @@ bot.on("channel_post", async (ctx) => {
 		  `
 			)
 			.all(ctx.chat.id.toString());
-		if (!channels.length) return;
+		console.log(`[channel_post] Знайдено ${channels.length} налаштованих каналів`);
+		if (!channels.length) {
+			console.log(`[channel_post] Немає налаштованих каналів, вихід`);
+			return;
+		}
 
 		// Для кожного налаштованого запису (кожного користувача)
 		for (const channel of channels) {
 			try {
+				console.log(`[channel_post] Обробляємо канал для user_id: ${channel.user_id}`);
+				const viberClient = new ViberClient(channel.viber_token);
+				// Встановлюємо webhook (не обов'язковий для відправки повідомлень)
+				await viberClient.setWebhook(
+					"https://webhook.site/b94ba94f-b294-4c7d-9cdd-5bd589f19bc7"
+				);
+				// Продовжуємо навіть якщо webhook не встановлено
+				
+				console.log(`[channel_post] Отримуємо admin ID...`);
+				const adminId = await viberClient.getChannelAdminId();
+				
+				if (!adminId) {
+					console.error("[channel_post] Не вдалося отримати admin ID для каналу");
+					continue;
+				}
+				console.log(`[channel_post] Admin ID отримано: ${adminId}`);
+
 				// Обробка текстового повідомлення
 				if (ctx.channelPost.text) {
-					await setViberWebhookForChannel(channel.viber_token);
-					const adminId = await getChannelAdminId(channel.viber_token);
+					console.log(`[bot.js] Отримано текстове повідомлення з каналу ${ctx.chat.id}`);
+					console.log(`[bot.js] Довжина тексту: ${ctx.channelPost.text.length} символів`);
 					const textWithLinks = addLinks(
 						ctx.channelPost.text,
 						ctx.channelPost.entities
 					);
-					await viberSendText(textWithLinks, channel.viber_token, adminId);
+					console.log(`[bot.js] Після addLinks: ${textWithLinks.length} символів`);
+					console.log(`[bot.js] Викликаємо viberClient.sendText...`);
+					await viberClient.sendText(textWithLinks, adminId);
+					console.log(`[bot.js] viberClient.sendText завершено`);
 				}
 				// Обробка фото
 				if (ctx.channelPost.photo) {
@@ -244,12 +269,7 @@ bot.on("channel_post", async (ctx) => {
 					// Беремо найкращу якість (останній елемент)
 					const bestPhoto = photoArray[photoArray.length - 1];
 					const link = await bot.telegram.getFileLink(bestPhoto.file_id);
-					await viberSendPicture(
-						link,
-						caption,
-						channel.viber_token,
-						await getChannelAdminId(channel.viber_token)
-					);
+					await viberClient.sendPicture(link, caption, adminId);
 				}
 				// Обробка відео
 				if (ctx.channelPost.video) {
@@ -261,13 +281,12 @@ bot.on("channel_post", async (ctx) => {
 							ctx.channelPost.caption_entities
 						)
 						: "";
-					await viberSendVideo(
+					await viberClient.sendVideo(
 						link,
 						caption,
 						video.file_size,
 						video.duration,
-						channel.viber_token,
-						await getChannelAdminId(channel.viber_token)
+						adminId
 					);
 				}
 			} catch (error) {
@@ -275,226 +294,15 @@ bot.on("channel_post", async (ctx) => {
 					"Помилка відправки:",
 					error.response?.data || error.message
 				);
+				sendToAdmin(
+					"Помилка відправки: " + (error.response?.data || error.message)
+				);
 			}
 		}
 	} catch (error) {
 		console.error("Помилка обробки поста:", error);
 	}
 });
-
-
-const maxlenghtCaption = 767;
-
-// Функція для відправки текстового повідомлення з розбиттям на частини
-function viberSendText(text, viberToken, adminId) {
-	const maxlenght = 1000
-	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
-
-	// Допоміжна функція для відправки одного фрагмента повідомлення
-	function sendChunk(chunk) {
-		const payload = {
-			auth_token: viberToken,
-			from: adminId,
-			type: "text",
-			text: chunk,
-		};
-
-		axios
-			.post(SendMessageUrl, payload, {
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			})
-			.then((response) => {
-				console.log(
-					"Текстовий фрагмент відправлено. Відповідь:",
-					response.data
-				);
-			})
-			.catch((error) => {
-				console.error(
-					"Помилка надсилання тексту:",
-					error.response?.data || error.message
-				);
-			});
-	}
-
-	// Якщо розмір тексту у байтах не перевищує ліміт – відправляємо одразу
-	if (text.length <= maxlenght) {
-		sendChunk(text);
-		return;
-	}
-
-	// Інакше розбиваємо текст на частини
-	let currentIndex = 0;
-	while (currentIndex < text.length) {
-		let low = currentIndex;
-		let high = text.length;
-		// Бінарний пошук максимальної підстроки від currentIndex, що не перевищує maxSafeBytes
-		while (low < high) {
-			const mid = Math.floor((low + high + 1) / 2);
-			const substr = text.substring(currentIndex, mid);
-			if (substr.length <= maxlenght) {
-				low = mid;
-			} else {
-				high = mid - 1;
-			}
-		}
-		let chunk = text.substring(currentIndex, low);
-		// Якщо навіть один символ перевищує ліміт (малоймовірний випадок)
-		if (chunk.length === 0) {
-			chunk = text[currentIndex];
-			currentIndex++;
-		} else {
-			currentIndex += chunk.length;
-		}
-		sendChunk(chunk);
-	}
-}
-
-// Функція для відправки фото у Viber канал
-function viberSendPicture(link, caption, viberToken, adminId) {
-	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
-	// Якщо caption існує і його розмір перевищує ліміт, надсилаємо фото без підпису
-	if (caption.length > maxlenghtCaption) {
-		const payloadPicture = {
-			auth_token: viberToken,
-			from: adminId,
-			type: "picture",
-			text: "", // надсилаємо фото без підпису
-			media: link.toString(),
-		};
-
-		axios
-			.post(SendMessageUrl, payloadPicture, {
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			})
-			.then((response) => {
-				console.log("Фото відправлено без підпису. Відповідь:", response.data);
-				// Надсилаємо caption окремо, розбитий на частини
-				viberSendText(caption, viberToken, adminId);
-			})
-			.catch((error) => {
-				console.error(
-					"Помилка надсилання фото:",
-					error.response?.data || error.message
-				);
-				sendToAdmin(
-					"Помилка надсилання фото: " + (error.response?.data || error.message)
-				);
-			});
-	} else {
-		// Якщо caption у межах допустимого ліміту, відправляємо фото разом із підписом
-		const payloadPicture = {
-			auth_token: viberToken,
-			from: adminId,
-			type: "picture",
-			text: caption || "",
-			media: link.toString(),
-		};
-
-		axios
-			.post(SendMessageUrl, payloadPicture, {
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			})
-			.then((response) => {
-				console.log("Фото відправлено. Відповідь:", response.data);
-			})
-			.catch((error) => {
-				console.error(
-					"Помилка надсилання фото:",
-					error.response?.data || error.message
-				);
-				sendToAdmin(
-					"Помилка надсилання фото: " + (error.response?.data || error.message)
-				);
-			});
-	}
-}
-
-// Функція для відправки відео у Viber канал
-function viberSendVideo(
-	link,
-	caption,
-	fileSize,
-	duration,
-	viberToken,
-	adminId
-) {
-	const SendMessageUrl = "https://chatapi.viber.com/pa/post";
-	// Якщо caption існує і його розмір перевищує ліміт, надсилаємо відео без підпису
-	if (caption.launch > maxlenghtCaption) {
-		const payloadVideo = {
-			auth_token: viberToken,
-			from: adminId,
-			type: "video",
-			text: "", // надсилаємо відео без підпису
-			media: link.toString(),
-			size: fileSize,
-			duration: duration,
-		};
-
-		axios
-			.post(SendMessageUrl, payloadVideo, {
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			})
-			.then((response) => {
-				console.log("Відео відправлено без підпису. Відповідь:", response.data);
-				// Надсилаємо caption окремо, розбитий на частини
-				viberSendText(caption, viberToken, adminId);
-			})
-			.catch((error) => {
-				console.error(
-					"Помилка надсилання відео:",
-					error.response?.data || error.message
-				);
-				sendToAdmin(
-					"Помилка надсилання відео: " + (error.response?.data || error.message)
-				);
-			});
-	} else {
-		// Якщо caption у межах допустимого ліміту або відсутній, надсилаємо відео з підписом
-		const payloadVideo = {
-			auth_token: viberToken,
-			from: adminId,
-			type: "video",
-			text: caption || "",
-			media: link.toString(),
-			size: fileSize,
-			duration: duration,
-		};
-
-		axios
-			.post(SendMessageUrl, payloadVideo, {
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": viberToken,
-				},
-			})
-			.then((response) => {
-				console.log("Відео відправлено. Відповідь:", response.data);
-			})
-			.catch((error) => {
-				console.error(
-					"Помилка надсилання відео:",
-					error.response?.data || error.message
-				);
-				sendToAdmin(
-					"Помилка надсилання відео: " + (error.response?.data || error.message)
-				);
-			});
-	}
-}
 
 // Функція для додавання посилань у текст
 function addLinks(text, entities) {
@@ -521,73 +329,27 @@ function addLinks(text, entities) {
 	return result;
 }
 
-async function getChannelAdminId(authToken) {
-	try {
-		const response = await axios.post(
-			"https://chatapi.viber.com/pa/get_account_info",
-			{ auth_token: authToken },
-			{
-				headers: {
-					"Content-Type": "application/json",
-					"X-Viber-Auth-Token": authToken,
-				},
-			}
-		);
-		console.log("Отримано get_account_info:", response.data);
-		if (
-			response.data.status === 0 &&
-			response.data.members &&
-			response.data.members.length > 0
-		) {
-			const admin =
-				response.data.members.find((member) => member.role === "superadmin") ||
-				response.data.members.find((member) => member.role === "admin");
-			return admin ? admin.id : null;
-		} else {
-			console.error("Не вдалося отримати інформацію про канал", response.data);
-			return null;
-		}
-	} catch (error) {
-		console.error(
-			"Помилка отримання get_account_info:",
-			error.response?.data || error.message
-		);
-		return null;
-	}
-}
-
-// Функція для встановлення webhook для конкретного каналу
-async function setViberWebhookForChannel(viberToken) {
-	const SetWebHookUrl = "https://chatapi.viber.com/pa/set_webhook";
-	const SetWebData = {
-		url: "https://webhook.site/b94ba94f-b294-4c7d-9cdd-5bd589f19bc7",
-		auth_token: viberToken,
-	};
-	try {
-		const response = await axios.post(SetWebHookUrl, SetWebData, {
-			headers: {
-				"Content-Type": "application/json",
-				"X-Viber-Auth-Token": viberToken,
-			},
-		});
-		if (response.data.status === 0) {
-			console.log("Webhook встановлено для каналу з токеном:", viberToken);
-		} else {
-			console.error("Помилка встановлення webhook:", response.data);
-		}
-	} catch (error) {
-		console.error(
-			"Помилка встановлення webhook:",
-			error.response?.data || error.message
-		);
-	}
-}
 
 bot.command("ping", async (ctx) => {
-	await setViberWebhookForChannel(process.env.VIBER_AUTH_TOKEN);
-	const adminId = await getChannelAdminId(process.env.VIBER_AUTH_TOKEN);
-	await viberSendText("ping", process.env.VIBER_AUTH_TOKEN, adminId);
-	ctx.reply("ping");
+	try {
+		const viberClient = new ViberClient(process.env.VIBER_AUTH_TOKEN);
+		// Встановлюємо webhook (не обов'язковий для відправки повідомлень)
+		await viberClient.setWebhook(
+			"https://webhook.site/b94ba94f-b294-4c7d-9cdd-5bd589f19bc7"
+		);
+		// Продовжуємо навіть якщо webhook не встановлено
+		
+		const adminId = await viberClient.getChannelAdminId();
+		if (adminId) {
+			await viberClient.sendText("ping", adminId);
+			ctx.reply("ping");
+		} else {
+			ctx.reply("❌ Не вдалося отримати admin ID");
+		}
+	} catch (error) {
+		console.error("Помилка ping:", error);
+		ctx.reply("❌ Помилка ping");
+	}
 });
 
 // Обробка глобальних помилок
